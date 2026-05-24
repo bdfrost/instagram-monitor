@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.23-alpine AS builder
+FROM docker.io/library/golang:1.23-alpine AS builder
 
 WORKDIR /app
 
@@ -13,7 +13,7 @@ COPY internal/ ./internal/
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/monitor ./cmd/monitor
 
 # Runtime stage - minimal image
-FROM alpine:3.20
+FROM docker.io/library/alpine:3.20
 
 RUN apk --no-cache add ca-certificates tzdata
 

@@ -11,7 +11,7 @@ Instagram — get alerted the moment they post.
 - **Multi-user monitoring** — track any number of Instagram accounts in one config
 - **Keyword matching** — filter alerts by keywords (e.g., "book", "open", "appointment")
 - **Catch-all mode** — get notified on ANY new post, not just keyword matches
-- **Persistent state** — remembers what posts it's already seen (ConfigMap-backed)
+- **Persistent state** — remembers what posts it's already seen (PVC-backed JSON file)
 - **Webhook notifications** — POSTs alerts to any HTTP endpoint (Slack, Discord, etc.)
 - **Dry-run mode** — test configuration without sending real alerts
 - **Minimal footprint** — ~12MB Alpine container, no external dependencies
@@ -21,7 +21,7 @@ Instagram — get alerted the moment they post.
 ### Local Testing
 
 ```bash
-# Build
+# Build (the Dockerfile uses fully qualified image names for podman compatibility)
 docker build -t instagram-monitor:latest .
 
 # Run with sample config
@@ -46,6 +46,20 @@ EOF
 
 docker run --rm -v $(pwd)/my-config.json:/app/config/config.json:ro \
   instagram-monitor:latest --dry-run
+```
+
+### Building & Pushing for Kubernetes
+
+```bash
+# Build and push to GHCR (podman login ghcr.io first)
+docker build -t ghcr.io/bdfrost/instagram-monitor:latest .
+docker push ghcr.io/bdfrost/instagram-monitor:latest
+```
+
+**Podman note:** If you get `short-name did not resolve` errors, the Dockerfile already uses fully qualified image names (`docker.io/library/...`). If you need to add unqualified search registries, add this to `/etc/containers/registries.conf`:
+
+```toml
+unqualified-search-registries = ["docker.io", "quay.io"]
 ```
 
 ### Kubernetes Deployment (Helm)
@@ -164,14 +178,14 @@ Private accounts are not supported — only public Instagram profiles work.
 ```
 .
 ├── cmd/monitor/main.go      # Main application
-├── internal/                 # Shared libraries (future expansion)
+├── internal/                 # Reserved for future shared libraries
 ├── charts/
 │   └── instagram-monitor/   # Helm chart
 │       ├── Chart.yaml
 │       ├── values.yaml
 │       └── templates/
 ├── config.sample.json       # Sample configuration
-├── Dockerfile               # Multi-stage build
+├── Dockerfile               # Multi-stage build (fully-qualified image names for podman)
 ├── .dockerignore
 ├── LICENSE
 └── README.md
