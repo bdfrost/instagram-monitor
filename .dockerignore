@@ -1,0 +1,13 @@
+# Binaries and build artifacts
+monitor
+
+# Vendor
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# State files
+state/*.json

@@ -1,0 +1,57 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "instagram-monitor.name" . }}
+  labels:
+    {{- include "instagram-monitor.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.schedule | quote }}
+  concurrencyPolicy: {{ .Values.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.activeDeadlineSeconds }}
+      backoffLimit: {{ .Values.backoffLimit }}
+      template:
+        metadata:
+          labels:
+            {{- include "instagram-monitor.selectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: {{ .Values.restartPolicy }}
+          containers:
+            - name: monitor
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              args:
+                - --config
+                - /app/config/config.json
+                {{- if .Values.dryRun }}
+                - --dry-run
+                {{- end }}
+              env:
+                {{- if .Values.notificationURL }}
+                - name: NOTIFICATION_URL
+                  value: {{ .Values.notificationURL | quote }}
+                {{- end }}
+                - name: HTTP_TIMEOUT
+                  value: {{ .Values.httpTimeout | quote }}
+              volumeMounts:
+                - name: config
+                  mountPath: /app/config
+                  readOnly: true
+                {{- if .Values.state.enabled }}
+                - name: state
+                  mountPath: /app/state
+                {{- end }}
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+          volumes:
+            - name: config
+              configMap:
+                name: {{ include "instagram-monitor.name" . }}-config
+            {{- if .Values.state.enabled }}
+            - name: state
+              persistentVolumeClaim:
+                claimName: {{ include "instagram-monitor.name" . }}-state
+            {{- end }}

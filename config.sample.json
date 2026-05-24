@@ -1,0 +1,13 @@
+{
+  "monitors": [
+    {
+      "username": "example_artist",
+      "displayName": "Example Tattoo Artist",
+      "keywords": ["book", "booking", "open", "appointment", "slots", "calendar"],
+      "notifyOnAny": false
+    }
+  ],
+  "stateFile": "/app/state/state.json",
+  "notificationURL": "",
+  "httpTimeout": 30
+}

@@ -1,0 +1,15 @@
+apiVersion: v2
+name: instagram-monitor
+description: Instagram feed monitor — alert on new posts matching keywords
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - instagram
+  - monitor
+  - cronjob
+  - notifications
+  - scraper
+home: https://github.com/bdfrost/instagram-monitor
+sources:
+  - https://github.com/bdfrost/instagram-monitor
