@@ -1,9 +1,11 @@
-name: Build & Push
+name: Build & Push Container
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    paths-ignore:
+      - '*.md'
+      - 'LICENSE'
 
 env:
   REGISTRY: ghcr.io
@@ -18,25 +20,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/login-action@v3
+      - name: Check out Go toolchain
+        uses: actions/setup-go@v5
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          go-version-file: go.mod
+          cache: true
 
       - uses: docker/metadata-action@v5
         id: meta
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=sha,format=short           # main push → sha-abc1234
-            type=semver,pattern={{version}}  # tag v0.1.0 → 0.1.0
-            type=semver,pattern={{major}}.{{minor}}  # v0.1.0 → 0.1
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+            type=sha,format=short
+            type=raw,value=edge
 
-      - uses: docker/build-push-action@v5
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

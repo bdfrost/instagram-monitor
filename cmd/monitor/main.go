@@ -14,6 +14,13 @@ import (
 	"time"
 )
 
+// Version info injected at build time via ldflags.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 // Config holds the full monitor configuration.
 type Config struct {
 	Monitors        []MonitorConfig `json:"monitors"`
