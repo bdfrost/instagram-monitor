@@ -100,37 +100,6 @@ spec:
       - CreateNamespace=true
 ```
 
-## CI/CD Pipeline
-
-This project uses GitHub Actions to automatically build, sign, and publish container images.
-
-### `.github/workflows/build.yml` — Continuous Build
-
-Triggers on every push to `main`:
-- Multi-arch build (linux/amd64 + linux/arm64)
-- Tags: `edge` + short SHA (`sha-abc1234`)
-- Pushes to `ghcr.io/bdfrost/instagram-monitor`
-
-### `.github/workflows/release.yml` — Tagged Releases
-
-Triggers on `v*` tags:
-- Multi-arch build (linux/amd64 + linux/arm64)
-- Tags: semver (`0.1.0`), minor (`0.1`), `latest`
-- Signs the image with **Cosign** (keyless OIDC, `id-token: write` permission)
-- Creates a **GitHub Release** with auto-generated changelog
-
-### Releasing a New Version
-
-```bash
-# Bump the version in values.yaml, then:
-git tag v0.2.0
-git push origin v0.2.0
-
-# Watch the pipeline: https://github.com/bdfrost/instagram-monitor/actions
-```
-
-After the pipeline completes, update the `image.tag` in your ArgoCD repo's `values.yaml` to deploy the new version.
-
 ## Configuration
 
 ### Monitors Array
@@ -148,16 +117,9 @@ Each entry in `monitors` defines one Instagram account to watch:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `notificationURL` | string | "" | Webhook URL to POST alerts to (**dev only** — use SealedSecret for production) |
+| `notificationURL` | string | "" | Webhook URL to POST alerts to |
 | `httpTimeout` | int | 30 | HTTP request timeout in seconds |
 | `stateFile` | string | /app/state/state.json | Path for persisting seen-post state |
-
-### Secret Configuration
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `secret.enabled` | bool | false | Enable secret-based notification URL (recommended for production) |
-| `secret.notificationURL` | string | "" | Webhook URL (stored as Kubernetes Secret, encrypt with kubeseal) |
 
 ### Environment Variable Overrides
 
@@ -199,37 +161,15 @@ Webhook POST body:
 }
 ```
 
-## Secrets Management
+## Notifications Secret
 
-The notification webhook URL is a credential and should not be stored in plain text
-in `values.yaml`. This chart supports two approaches:
+The CronJob reads the webhook URL from a Kubernetes Secret. Create this secret yourself (e.g. via SealedSecret or `kubectl create secret`):
 
-### Option 1: SealedSecret (Recommended)
+| Secret Name | Key | Value |
+|-------------|-----|-------|
+| `instagram-monitor-secrets` | `NOTIFICATION_URL` | Your webhook URL |
 
-1. Set your webhook URL temporarily in `values.yaml`:
-   ```yaml
-   secret:
-     enabled: true
-     notificationURL: "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXX"
-   ```
-
-2. Generate the plain Secret and encrypt it with `kubeseal`:
-   ```bash
-   helm template instagram-monitor . -n instagram-monitor -f values.yaml | kubectl apply --dry-run=client -n instagram-monitor -f -
-   kubectl get secret instagram-monitor-secrets -n instagram-monitor -o yaml \
-     | kubeseal --controller-namespace kube-system --controller-name sealed-secrets \
-       -o yaml > charts/instagram-monitor/sealedsecret.yaml
-   ```
-
-3. Remove the plaintext URL from `values.yaml` and commit `sealedsecret.yaml`.
-
-### Option 2: Plain env var (Development Only)
-
-For testing, you can set the webhook URL directly:
-```yaml
-notificationURL: "https://hooks.slack.com/services/..."
-```
-⚠️ **Never commit this to Git** — use `--set` at install time or use SealedSecret.
+The secret ref is marked `optional: true` — the monitor runs even without it, logging alerts to stdout.
 
 ## Scraping Notes
 
