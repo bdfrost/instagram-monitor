@@ -64,7 +64,6 @@ The config JSON for the monitor.
 {{- end }}
   ],
   "stateFile": "/app/state/state.json",
-  "notificationURL": {{ .Values.notificationURL | default "" | quote }},
   "httpTimeout": {{ .Values.httpTimeout | default 30 }}
 }
 {{- end }}

@@ -8,6 +8,5 @@
     }
   ],
   "stateFile": "/app/state/state.json",
-  "notificationURL": "",
   "httpTimeout": 30
 }

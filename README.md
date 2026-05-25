@@ -65,11 +65,24 @@ unqualified-search-registries = ["docker.io", "quay.io"]
 ### Kubernetes Deployment (Helm)
 
 ```bash
+# 1. Create the notification secret first
+kubectl create secret generic instagram-monitor-secrets -n instagram-monitor \
+  --from-literal=NOTIFICATION_URL="https://hooks.slack.com/services/..."
+
+# 2. Install the chart (reads NOTIFICATION_URL from the secret above)
 helm install instagram-monitor ./charts/instagram-monitor \
+  --create-namespace \
   --set "monitors[0].username=my_artist" \
   --set "monitors[0].displayName=My Artist" \
-  --set "monitors[0].keywords={book,booking,open}" \
-  --set notificationURL="https://hooks.slack.com/services/..."
+  --set "monitors[0].keywords={book,booking,open}"
+```
+
+Or, with a SealedSecret — create and encrypt the secret, commit it, then install the chart normally:
+
+```bash
+helm install instagram-monitor ./charts/instagram-monitor \
+  --create-namespace \
+  -f values.yaml
 ```
 
 ### Via ArgoCD
