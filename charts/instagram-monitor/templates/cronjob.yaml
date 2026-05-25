@@ -30,12 +30,15 @@ spec:
                 - --dry-run
                 {{- end }}
               env:
-                {{- if .Values.notificationURL }}
-                - name: NOTIFICATION_URL
-                  value: {{ .Values.notificationURL | quote }}
-                {{- end }}
                 - name: HTTP_TIMEOUT
                   value: {{ .Values.httpTimeout | quote }}
+                {{- if .Values.secret.enabled }}
+                - name: NOTIFICATION_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "instagram-monitor.name" . }}-secrets
+                      key: NOTIFICATION_URL
+                {{- end }}
               volumeMounts:
                 - name: config
                   mountPath: /app/config
