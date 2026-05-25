@@ -1,31 +1,18 @@
 # Default values for instagram-monitor.
-# This is a YAML-formatted file.
 
 image:
   repository: ghcr.io/bdfrost/instagram-monitor
   pullPolicy: IfNotPresent
   tag: "0.1.3"
 
-# CronJob schedule — defaults to every 3 hours
 schedule: "0 */3 * * *"
-
-# Concurrency policy
 concurrencyPolicy: Forbid
-
-# Job history limits
 successfulJobsHistoryLimit: 3
 failedJobsHistoryLimit: 1
-
-# Restart policy for the job pod
 restartPolicy: Never
-
-# Active deadline seconds
 activeDeadlineSeconds: 300
-
-# Backoff limit for job retries
 backoffLimit: 0
 
-# Resource limits for the pod
 resources:
   limits:
     cpu: 200m
@@ -34,7 +21,6 @@ resources:
     cpu: 50m
     memory: 64Mi
 
-# State persistence — PVC for remembering which posts have been seen
 state:
   enabled: true
   size: 10Mi
@@ -42,20 +28,9 @@ state:
   accessModes:
     - ReadWriteOnce
 
-# Notification webhook URL — stored as a Kubernetes Secret.
-# Set the plaintext URL here, render the chart to get a plain Secret,
-# then encrypt it with kubeseal. See sealedsecret.yaml for the workflow.
-# The notification URL is never stored in the rendered ConfigMap or env value.
-secret:
-  notificationURL: ""
-
-# HTTP timeout in seconds
 httpTimeout: 30
-
-# Dry run mode
 dryRun: false
 
-# Monitors — list of Instagram accounts to watch
 monitors:
   - username: "example_artist"
     displayName: "Example Tattoo Artist"
