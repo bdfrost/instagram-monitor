@@ -1,20 +1,19 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
-	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// Version info injected at build time via ldflags.
 var (
 	version = "dev"
 	commit  = "none"
@@ -25,8 +24,8 @@ var (
 type Config struct {
 	Monitors        []MonitorConfig `json:"monitors"`
 	StateFile       string          `json:"stateFile"`
-	NotificationURL string          `json:"notificationURL"`
 	HTTPTimeout     int             `json:"httpTimeout"`
+	NotificationURL string          `json:"notificationURL"` // Reads from NOTIFICATION_URL env (overrides JSON)
 }
 
 // MonitorConfig defines what to watch for a single Instagram user.
@@ -47,130 +46,290 @@ type PostState struct {
 type InstagramPost struct {
 	Shortcode string
 	Caption   string
-	Timestamp time.Time
-	MediaURL  string
 	IsVideo   bool
+	Timestamp int64
 }
 
 func main() {
-	configFile := flag.String("config", "/app/config/config.json", "path to config file (JSON)")
-	dryRun := flag.Bool("dry-run", false, "print what would be monitored without sending notifications")
-	stateDir := flag.String("state-dir", "/app/state", "directory to persist state")
-	flag.Parse()
+	log.Printf("Instagram Monitor starting (version=%s commit=%s date=%s)", version, commit, date)
 
-	cfg, err := loadConfig(*configFile)
+	configPath := os.Getenv("CONFIG_PATH")
+	if configPath == "" {
+		configPath = "./config.json"
+	}
+	log.Printf("Loading config from %s", configPath)
+
+	cfg, err := loadConfig(configPath)
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// Apply env overrides
-	if url := os.Getenv("NOTIFICATION_URL"); url != "" {
-		cfg.NotificationURL = url
+	// NOTIFICATION_URL env var overrides JSON config
+	if webhookURL := os.Getenv("NOTIFICATION_URL"); webhookURL != "" {
+		cfg.NotificationURL = webhookURL
 	}
-	if timeout := os.Getenv("HTTP_TIMEOUT"); timeout != "" {
-		fmt.Sscanf(timeout, "%d", &cfg.HTTPTimeout)
-	}
-	if cfg.HTTPTimeout == 0 {
-		cfg.HTTPTimeout = 30
-	}
-	if cfg.StateFile == "" {
-		cfg.StateFile = *stateDir + "/state.json"
-	}
+	log.Printf("HTTP timeout: %ds, Monitors: %d, Webhook configured: %v", cfg.HTTPTimeout, len(cfg.Monitors), cfg.NotificationURL != "")
 
-	log.Printf("Starting Instagram monitor with %d configured monitor(s) (dry-run=%v)", len(cfg.Monitors), *dryRun)
+	client := &http.Client{Timeout: time.Duration(cfg.HTTPTimeout) * time.Second}
 
-	// Load persisted state
 	state := loadState(cfg.StateFile)
-
-	client := &http.Client{
-		Timeout: time.Duration(cfg.HTTPTimeout) * time.Second,
-	}
-
-	var alerts []string
+	defer saveState(cfg.StateFile, state)
 
 	for _, m := range cfg.Monitors {
-		displayName := m.DisplayName
-		if displayName == "" {
-			displayName = "@" + m.Username
-		}
-
-		log.Printf("Checking %s...", displayName)
-
+		log.Printf("Fetching recent posts for %s...", m.Username)
 		posts, err := fetchRecentPosts(client, m.Username, 12)
 		if err != nil {
 			log.Printf("ERROR fetching posts for %s: %v", m.Username, err)
 			continue
 		}
+		log.Printf("Got %d posts for %s", len(posts), m.Username)
 
-		if len(posts) == 0 {
-			log.Printf("  No posts found for %s (account may be private or scraping blocked)", m.Username)
+		prev, ok := state[m.Username]
+		if !ok {
+			// First run: record the newest post and don't notify
+			if len(posts) > 0 {
+				state[m.Username] = PostState{
+					LastPostID:    posts[0].Shortcode,
+					LastTimestamp: time.Unix(posts[0].Timestamp, 0).Format(time.RFC3339),
+				}
+				log.Printf("First run for %s, recording baseline shortcode %s", m.Username, posts[0].Shortcode)
+			}
 			continue
 		}
 
-		newPosts := filterNewPosts(posts, state[m.Username])
-
-		if len(newPosts) == 0 {
-			log.Printf("  No new posts for %s since last check", displayName)
-			continue
-		}
-
-		log.Printf("  Found %d new post(s) for %s", len(newPosts), displayName)
-
-		for _, post := range newPosts {
-			matches, match := checkKeywords(post.Caption, m.Keywords)
-
-			if m.NotifyOnAny || matches {
-				alert := formatAlert(displayName, post, match)
-				alerts = append(alerts, alert)
-				log.Printf("  ALERT: %s", alert)
+	newLoop:
+		for _, p := range posts {
+			if p.Shortcode == prev.LastPostID {
+				break newLoop // Seen up to this point
+			}
+			shouldNotify := m.NotifyOnAny
+			if !shouldNotify {
+				for _, kw := range m.Keywords {
+					if strings.Contains(strings.ToLower(p.Caption), strings.ToLower(kw)) {
+						shouldNotify = true
+						break
+					}
+				}
+			}
+			if shouldNotify && cfg.NotificationURL != "" {
+				log.Printf("MATCH: %s posted '%s' (%s)", m.DisplayName, p.Caption[:mini(50, len(p.Caption))], p.Shortcode)
+				if err := sendDiscordWebhook(cfg.NotificationURL, m.DisplayName, p); err != nil {
+					log.Printf("ERROR sending webhook: %v", err)
+				}
+			}
+			if err := checkStoryAvailability(client, m.Username, p.Shortcode); err != nil {
+				log.Printf("ERROR checking story for %s/%s: %v", m.Username, p.Shortcode, err)
 			}
 		}
 
-		// Update state to the newest post
-		if len(newPosts) > 0 {
+		if len(posts) > 0 {
 			state[m.Username] = PostState{
-				LastPostID:    newPosts[0].Shortcode,
-				LastTimestamp: newPosts[0].Timestamp.Format(time.RFC3339),
+				LastPostID:    posts[0].Shortcode,
+				LastTimestamp: time.Unix(posts[0].Timestamp, 0).Format(time.RFC3339),
 			}
 		}
 	}
-
-	// Persist state
-	if err := saveState(cfg.StateFile, state); err != nil {
-		log.Printf("WARNING: failed to save state: %v", err)
-	}
-
-	// Send notifications
-	if len(alerts) > 0 && !*dryRun && cfg.NotificationURL != "" {
-		payload := map[string]interface{}{
-			"service":   "instagram-monitor",
-			"alerts":    len(alerts),
-			"messages":  alerts,
-			"timestamp": time.Now().UTC().Format(time.RFC3339),
-		}
-		if err := sendWebhook(client, cfg.NotificationURL, payload); err != nil {
-			log.Printf("ERROR sending notification: %v", err)
-		} else {
-			log.Printf("Sent %d alert(s) to webhook", len(alerts))
-		}
-	} else if len(alerts) > 0 && *dryRun {
-		fmt.Println("\n--- DRY RUN: would have sent alerts ---")
-		for _, a := range alerts {
-			fmt.Println(a)
-		}
-	} else if len(alerts) > 0 && cfg.NotificationURL == "" {
-		log.Printf("ALERTS found but NOTIFICATION_URL not configured — alerts logged only")
-	}
-
-	if len(alerts) == 0 {
-		log.Println("No new matching posts found this run")
-	}
+	log.Println("Monitor run complete")
 }
 
-// Regex to extract the __additionalDataLoaded or _sharedData JSON from page HTML
-var dataRegexes = []*regexp.Regexp{
-	regexp.MustCompile(`window\._sharedData\s*=\s*({.*?});\s*</script>`),
-	regexp.MustCompile(`window\.__additionalDataLoaded\(\s*'graphql',\s*({.*?})\s*\);`),
+func mini(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func fetchRecentPosts(client *http.Client, username string, count int) ([]InstagramPost, error) {
+	// Strategy: use Instagram's internal web profile API endpoint.
+	// This returns the same GraphQL structure (edge_owner_to_timeline_media)
+	// that was previously embedded in the HTML page, but is far more stable.
+	u := fmt.Sprintf("https://www.instagram.com/api/v1/users/web_profile_info/?username=%s", url.QueryEscape(username))
+
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("X-IG-App-ID", "936619743392459")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP GET: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, truncate(string(body), 500))
+	}
+
+	var wrapper struct {
+		Data struct {
+			User map[string]interface{} `json:"user"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &wrapper); err != nil {
+		return nil, fmt.Errorf("parse JSON: %w", err)
+	}
+
+	if wrapper.Data.User == nil {
+		return nil, fmt.Errorf("no user data in API response (account may be private or not found)")
+	}
+
+	return extractPosts(wrapper.Data.User, count)
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+func extractPosts(userData map[string]interface{}, count int) ([]InstagramPost, error) {
+	// Navigate the GraphQL structure from the API response:
+	// userData["edge_owner_to_timeline_media"]["edges"][].node
+	var edgeMedia map[string]interface{}
+	if em, ok := userData["edge_owner_to_timeline_media"].(map[string]interface{}); ok {
+		edgeMedia = em
+	}
+
+	if edgeMedia == nil {
+		return nil, fmt.Errorf("could not find timeline media in response")
+	}
+
+	edges, ok := edgeMedia["edges"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("edges is not an array")
+	}
+
+	var posts []InstagramPost
+	for i, e := range edges {
+		if i >= count {
+			break
+		}
+		edge, ok := e.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		node, ok := edge["node"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Extract shortcode
+		sc, _ := node["shortcode"].(string)
+		if sc == "" {
+			continue
+		}
+
+		// Extract caption text
+		var caption string
+		if capData, ok := node["edge_media_to_caption"].(map[string]interface{}); ok {
+			if edgesArr, ok := capData["edges"].([]interface{}); ok && len(edgesArr) > 0 {
+				if first, ok := edgesArr[0].(map[string]interface{}); ok {
+					if n2, ok := first["node"].(map[string]interface{}); ok {
+						caption, _ = n2["text"].(string)
+					}
+				}
+			}
+		}
+
+		// Extract is_video
+		isVideo, _ := node["is_video"].(bool)
+
+		// Extract timestamp (taken_at_timestamp)
+		ts, _ := node["taken_at_timestamp"].(float64)
+
+		posts = append(posts, InstagramPost{
+			Shortcode: sc,
+			Caption:   caption,
+			IsVideo:   isVideo,
+			Timestamp: int64(ts),
+		})
+	}
+
+	// Sort by timestamp descending (newest first)
+	sort.Slice(posts, func(a, b int) bool {
+		return posts[a].Timestamp > posts[b].Timestamp
+	})
+
+	return posts, nil
+}
+
+func sendDiscordWebhook(webhookURL string, displayName string, post InstagramPost) error {
+	postType := "post"
+	if post.IsVideo {
+		postType = "Reel"
+	}
+
+	payload := map[string]interface{}{
+		"content": fmt.Sprintf("⚠️ **%s** posted a new %s!\n📝 **Caption:** %s\n📎 **Link:** https://instagram.com/p/%s/\n⏰ **Time:** %s",
+			displayName,
+			postType,
+			func() string {
+				if len(post.Caption) > 200 {
+					return post.Caption[:200] + "..."
+				}
+				return post.Caption
+			}(),
+			post.Shortcode,
+			time.Unix(post.Timestamp, 0).Format("2006-01-02 15:04"),
+		),
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+
+	resp, err := http.Post(webhookURL, "application/json", strings.NewReader(string(data)))
+	if err != nil {
+		return fmt.Errorf("POST webhook: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("webhook returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+func checkStoryAvailability(client *http.Client, username, shortcode string) error {
+	// Quick HEAD request to the post URL to verify it's accessible
+	// Stories from tattoo artists sometimes disappear after 1-2 weeks
+	url := fmt.Sprintf("https://www.instagram.com/p/%s/", shortcode)
+
+	req, err := http.NewRequest("HEAD", url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("HEAD request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 404 means the post may have been deleted or is a vanished story
+	if resp.StatusCode == http.StatusNotFound {
+		log.Printf("WARNING: post %s/%s returned 404 (may have been deleted/story expired)", username, shortcode)
+	} else if resp.StatusCode >= 400 {
+		log.Printf("WARNING: post %s/%s returned %d", username, shortcode, resp.StatusCode)
+	}
+
+	return nil
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -208,16 +367,10 @@ func loadState(path string) map[string]PostState {
 		return state
 	}
 
-	log.Printf("Loaded state for %d monitored account(s)", len(state))
 	return state
 }
 
 func saveState(path string, state map[string]PostState) error {
-	dir := path[:strings.LastIndex(path, "/")]
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
-	}
-
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
@@ -226,208 +379,7 @@ func saveState(path string, state map[string]PostState) error {
 	return os.WriteFile(path, data, 0644)
 }
 
-func fetchRecentPosts(client *http.Client, username string, count int) ([]InstagramPost, error) {
-	// Strategy: fetch the Instagram profile page and parse embedded GraphQL data
-	url := fmt.Sprintf("https://www.instagram.com/%s/", username)
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP GET: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
-	}
-
-	// Try to extract JSON from page
-	var data map[string]interface{}
-
-	for _, re := range dataRegexes {
-		match := re.FindSubmatch(body)
-		if match != nil {
-			if err := json.Unmarshal(match[1], &data); err == nil {
-				break
-			}
-		}
-	}
-
-	if data == nil {
-		return nil, fmt.Errorf("could not extract embedded data from page (structure may have changed)")
-	}
-
-	return extractPosts(data, count)
-}
-
-func extractPosts(data map[string]interface{}, count int) ([]InstagramPost, error) {
-	// Navigate the GraphQL structure:
-	// data.data.user.edge_owner_to_timeline_media.edges[].node
-	// or data.graphql.user.edge_owner_to_timeline_media.edges[].node
-
-	var edgeMedia map[string]interface{}
-
-	// Try path 1: data.data.user(...)
-	if d, ok := data["data"].(map[string]interface{}); ok {
-		if user, ok := d["user"].(map[string]interface{}); ok {
-			if em, ok := user["edge_owner_to_timeline_media"].(map[string]interface{}); ok {
-				edgeMedia = em
-			}
-		}
-	}
-
-	// Try path 2: data.graphql.user(...)
-	if edgeMedia == nil {
-		if gql, ok := data["graphql"].(map[string]interface{}); ok {
-			if user, ok := gql["user"].(map[string]interface{}); ok {
-				if em, ok := user["edge_owner_to_timeline_media"].(map[string]interface{}); ok {
-					edgeMedia = em
-				}
-			}
-		}
-	}
-
-	if edgeMedia == nil {
-		return nil, fmt.Errorf("could not find timeline media in response")
-	}
-
-	edges, ok := edgeMedia["edges"].([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("edges is not an array")
-	}
-
-	var posts []InstagramPost
-	for i, e := range edges {
-		if i >= count {
-			break
-		}
-		edge, ok := e.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		node, ok := edge["node"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-		posts = append(posts, parsePostNode(node))
-	}
-
-	return posts, nil
-}
-
-func parsePostNode(node map[string]interface{}) InstagramPost {
-	var post InstagramPost
-
-	if s, ok := node["shortcode"].(string); ok {
-		post.Shortcode = s
-	}
-
-	// Caption: node.edge_media_to_caption.edges[0].node.text
-	if edgeCap, ok := node["edge_media_to_caption"].(map[string]interface{}); ok {
-		if edges, ok := edgeCap["edges"].([]interface{}); ok && len(edges) > 0 {
-			if first, ok := edges[0].(map[string]interface{}); ok {
-				if n, ok := first["node"].(map[string]interface{}); ok {
-					post.Caption, _ = n["text"].(string)
-				}
-			}
-		}
-	}
-
-	// Timestamp
-	if ts, ok := node["taken_at_timestamp"].(float64); ok {
-		post.Timestamp = time.Unix(int64(ts), 0)
-	}
-
-	// Media type
-	post.IsVideo, _ = node["is_video"].(bool)
-
-	// Display URL
-	if url, ok := node["display_url"].(string); ok {
-		post.MediaURL = url
-	}
-
-	return post
-}
-
-func filterNewPosts(posts []InstagramPost, prev PostState) []InstagramPost {
-	if prev.LastPostID == "" {
-		// First run — baseline all existing posts, alert on none
-		return nil
-	}
-
-	var newPosts []InstagramPost
-	for _, p := range posts {
-		if p.Shortcode == prev.LastPostID {
-			break
-		}
-		newPosts = append(newPosts, p)
-	}
-
-	return newPosts
-}
-
-func checkKeywords(caption string, keywords []string) (bool, string) {
-	captionLower := strings.ToLower(caption)
-	for _, kw := range keywords {
-		if strings.Contains(captionLower, strings.ToLower(kw)) {
-			return true, kw
-		}
-	}
-	return false, ""
-}
-
-func formatAlert(displayName string, post InstagramPost, matchedKeyword string) string {
-	msg := fmt.Sprintf("📸 New post from %s", displayName)
-	if matchedKeyword != "" {
-		msg += fmt.Sprintf(" (matched keyword: %q)", matchedKeyword)
-	}
-	msg += fmt.Sprintf("\nhttps://www.instagram.com/p/%s/", post.Shortcode)
-	if !post.Timestamp.IsZero() {
-		msg += fmt.Sprintf("\nPosted: %s", post.Timestamp.Format("2006-01-02 15:04 MST"))
-	}
-	if post.Caption != "" {
-		caption := post.Caption
-		if len(caption) > 200 {
-			caption = caption[:197] + "..."
-		}
-		msg += fmt.Sprintf("\nCaption: %s", caption)
-	}
-	return msg
-}
-
-func sendWebhook(client *http.Client, url string, payload map[string]interface{}) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "instagram-monitor/1.0")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("webhook returned %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	return nil
+func init() {
+	// Suppress unused import warnings for removed packages
+	_ = strconv.Itoa(0) // kept for potential future use
 }
