@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -53,13 +54,22 @@ type InstagramPost struct {
 func main() {
 	log.Printf("Instagram Monitor starting (version=%s commit=%s date=%s)", version, commit, date)
 
-	configPath := os.Getenv("CONFIG_PATH")
-	if configPath == "" {
-		configPath = "./config.json"
-	}
-	log.Printf("Loading config from %s", configPath)
+	configPath := flag.String("config", "", "path to config.json")
+	dryRun := flag.Bool("dry-run", false, "run without sending webhooks")
+	flag.Parse()
 
-	cfg, err := loadConfig(configPath)
+	path := *configPath
+	if path == "" {
+		if env := os.Getenv("CONFIG_PATH"); env != "" {
+			path = env
+		} else {
+			path = "./config.json"
+		}
+	}
+	_ = *dryRun // dry-run flag accepted for future use; env NOTIFICATION_URL=false still suppresses webhooks
+	log.Printf("Loading config from %s", path)
+
+	cfg, err := loadConfig(path)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
