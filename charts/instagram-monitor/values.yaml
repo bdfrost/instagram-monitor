@@ -9,17 +9,17 @@ image:
 # CronJob schedule — defaults to every 3 hours
 schedule: "0 */3 * * *"
 
-# Concurrency policy — don't run a new job if the previous one is still running
+# Concurrency policy
 concurrencyPolicy: Forbid
 
 # Job history limits
 successfulJobsHistoryLimit: 3
 failedJobsHistoryLimit: 1
 
-# Restart policy for the job pod (Never for single-run CronJobs)
+# Restart policy for the job pod
 restartPolicy: Never
 
-# Active deadline seconds — kill the job if it takes longer than this
+# Active deadline seconds
 activeDeadlineSeconds: 300
 
 # Backoff limit for job retries
@@ -42,10 +42,11 @@ state:
   accessModes:
     - ReadWriteOnce
 
-# Secret configuration for webhook URLs
-# Set enabled=true and provide the notificationURL, then encrypt with kubeseal
+# Notification webhook URL — stored as a Kubernetes Secret.
+# Set the plaintext URL here, render the chart to get a plain Secret,
+# then encrypt it with kubeseal. See sealedsecret.yaml for the workflow.
+# The notification URL is never stored in the rendered ConfigMap or env value.
 secret:
-  enabled: false
   notificationURL: ""
 
 # HTTP timeout in seconds
@@ -55,11 +56,6 @@ httpTimeout: 30
 dryRun: false
 
 # Monitors — list of Instagram accounts to watch
-# Each entry:
-#   username: instagram_username (without @)
-#   displayName: Friendly name for alerts
-#   keywords: list of keywords to match in captions
-#   notifyOnAny: if true, alert on ANY new post (not just keyword matches)
 monitors:
   - username: "example_artist"
     displayName: "Example Tattoo Artist"

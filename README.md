@@ -148,16 +148,14 @@ Each entry in `monitors` defines one Instagram account to watch:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `notificationURL` | string | "" | Webhook URL to POST alerts to (**dev only** — use SealedSecret for production) |
 | `httpTimeout` | int | 30 | HTTP request timeout in seconds |
 | `stateFile` | string | /app/state/state.json | Path for persisting seen-post state |
 
-### Secret Configuration
+### Secret Settings
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `secret.enabled` | bool | false | Enable secret-based notification URL (recommended for production) |
-| `secret.notificationURL` | string | "" | Webhook URL (stored as Kubernetes Secret, encrypt with kubeseal) |
+| Field | Type | Description |
+|-------|------|-------------|
+| `secret.notificationURL` | string | Webhook URL — stored as encrypted SealedSecret, never in ConfigMap or env values |
 
 ### Environment Variable Overrides
 

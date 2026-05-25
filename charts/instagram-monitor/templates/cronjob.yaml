@@ -32,7 +32,7 @@ spec:
               env:
                 - name: HTTP_TIMEOUT
                   value: {{ .Values.httpTimeout | quote }}
-                {{- if .Values.secret.enabled }}
+                {{- if .Values.secret.notificationURL }}
                 - name: NOTIFICATION_URL
                   valueFrom:
                     secretKeyRef:
